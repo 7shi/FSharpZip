@@ -1,0 +1,38 @@
+﻿using Nemerle.Collections;
+using Nemerle.Text;
+using Nemerle.Utility;
+
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Data;
+using System.Drawing;
+using System.Linq;
+using System.Text;
+using System.Windows.Forms;
+
+namespace ZipForm
+{
+    /// <summary>
+    /// Description of MainForm.
+    /// </summary>
+    public partial class MainForm : Form
+    {
+        public this()
+        {
+            InitializeComponent();
+        }
+
+        protected override OnDragEnter(e:DragEventArgs) : void
+        {
+            when (e.Data.GetDataPresent(DataFormats.FileDrop))
+                e.Effect = DragDropEffects.Link;
+        }
+        
+        protected override OnDragDrop(e:DragEventArgs) : void
+        {
+            def files = e.Data.GetData(DataFormats.FileDrop) :> array[string];
+            when (files != null) Zip.createZip(files)
+        }
+    }
+}
