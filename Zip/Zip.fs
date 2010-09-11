@@ -30,27 +30,23 @@ let getDosTime (dt:DateTime) =
     uint16((dt.Hour <<< 11) ||| (dt.Minute <<< 5) ||| (dt.Second >>> 1))
 
 type ZipHeader =
-  { version:uint16
-    flags:uint16
-    compression:uint16
-    dos_time:uint16
-    dos_date:uint16
-    crc32:uint32
-    compressed_size:uint32
-    uncompressed_size:uint32
-    filename_length:uint16
-    extra_field_length:uint16
-    _fname:byte[]
-    _attrs:uint32
-    _pos:uint32 }
+    { version:uint16
+      flags:uint16
+      compression:uint16
+      dos_time:uint16
+      dos_date:uint16
+      crc32:uint32
+      compressed_size:uint32
+      uncompressed_size:uint32
+      filename_length:uint16
+      extra_field_length:uint16 }
 
-    static member Create path (rel:string) (data:byte[]) pos =
+    static member Create path (relb:byte[]) (data:byte[]) pos =
         let dt, crc, size =
             if data = null then
                 Directory.GetLastWriteTime path, 0u, 0u
             else
                 File.GetLastWriteTime path, crc32 data, uint32 data.Length
-        let fn = Encoding.Default.GetBytes rel
         { version            = 10us
           flags              = 0us
           compression        = 0us
@@ -59,11 +55,21 @@ type ZipHeader =
           crc32              = crc
           compressed_size    = size
           uncompressed_size  = size
-          filename_length    = uint16 fn.Length
-          extra_field_length = 0us
-          _fname             = fn
-          _attrs             = uint32(File.GetAttributes path)
-          _pos               = pos }
+          filename_length    = uint16 relb.Length
+          extra_field_length = 0us }
+    
+    static member Read (br:BinaryReader) =
+        let pos = uint32 br.BaseStream.Position
+        { version            = br.ReadUInt16()
+          flags              = br.ReadUInt16()
+          compression        = br.ReadUInt16()
+          dos_time           = br.ReadUInt16()
+          dos_date           = br.ReadUInt16()
+          crc32              = br.ReadUInt32()
+          compressed_size    = br.ReadUInt32()
+          uncompressed_size  = br.ReadUInt32()
+          filename_length    = br.ReadUInt16()
+          extra_field_length = br.ReadUInt16() }
     
     member x.Write (bw:BinaryWriter) =
         bw.Write x.version
@@ -77,23 +83,69 @@ type ZipHeader =
         bw.Write x.filename_length
         bw.Write x.extra_field_length
 
+type ZipDirHeader =
+    { version:uint16
+      header:ZipHeader
+      _1:uint16 // file comment length
+      _2:uint16 // disk number start
+      _3:uint16 // internal file attributes
+      attrs:uint32
+      pos:uint32
+      fname:byte[] }
+
+    static member Create path (rel:string) (data:byte[]) pos =
+        let relb = Encoding.Default.GetBytes rel
+        { version = 10us
+          header  = ZipHeader.Create path relb data pos
+          _1      = 0us
+          _2      = 0us
+          _3      = 0us
+          attrs   = uint32(File.GetAttributes path)
+          pos     = pos
+          fname   = relb }
+    
+    static member Read (br:BinaryReader) =
+        let v = br.ReadUInt16()
+        let h = ZipHeader.Read br
+        let r = { version = v
+                  header  = h
+                  _1      = br.ReadUInt16()
+                  _2      = br.ReadUInt16()
+                  _3      = br.ReadUInt16()
+                  attrs   = br.ReadUInt32()
+                  pos     = br.ReadUInt32()
+                  fname   = br.ReadBytes(int h.filename_length) }
+        let exlen = (int64 h.extra_field_length) + (int64 r._1)
+        ignore <| br.BaseStream.Seek(exlen, SeekOrigin.Current)
+        r
+    
+    member x.Write (bw:BinaryWriter) =
+        bw.Write x.version
+        x.header.Write bw
+        bw.Write x._1
+        bw.Write x._2
+        bw.Write x._3
+        bw.Write x.attrs
+        bw.Write x.pos
+        bw.Write x.fname
+
 let mkrel reldir (name:string) =
     if reldir = "" then name else reldir + "/" + name
 
-let writeFile (list:List<ZipHeader>) (bw:BinaryWriter) path rel =
+let writeFile (list:List<ZipDirHeader>) (bw:BinaryWriter) path rel =
     let data = File.ReadAllBytes path
-    let ziph = ZipHeader.Create path rel data (uint32 bw.BaseStream.Position)
+    let ziph = ZipDirHeader.Create path rel data (uint32 bw.BaseStream.Position)
     bw.Write [| byte 'P'; byte 'K'; 3uy; 4uy |]
-    ziph.Write bw
-    bw.Write ziph._fname
+    ziph.header.Write bw
+    bw.Write ziph.fname
     bw.Write data
     list.Add(ziph)
 
-let rec writeDir (list:List<ZipHeader>) (bw:BinaryWriter) path rel =
-    let ziph = ZipHeader.Create path (rel + "/") null (uint32 bw.BaseStream.Position)
+let rec writeDir (list:List<ZipDirHeader>) (bw:BinaryWriter) path rel =
+    let ziph = ZipDirHeader.Create path (rel + "/") null (uint32 bw.BaseStream.Position)
     bw.Write [| byte 'P'; byte 'K'; 3uy; 4uy |]
-    ziph.Write bw
-    bw.Write ziph._fname
+    ziph.header.Write bw
+    bw.Write ziph.fname
     list.Add(ziph)
     
     let di = new DirectoryInfo(path)
@@ -102,36 +154,29 @@ let rec writeDir (list:List<ZipHeader>) (bw:BinaryWriter) path rel =
     for di2 in di.GetDirectories() do
         writeDir list bw di2.FullName (mkrel rel di2.Name)
 
-let write (list:List<ZipHeader>) (bw:BinaryWriter) path rel =
+let write (list:List<ZipDirHeader>) (bw:BinaryWriter) path rel =
     if File.Exists path then writeFile list bw path rel
                         else writeDir  list bw path rel
 
 let writeZip (bw:BinaryWriter) (files:string[]) =
-    let list = new List<ZipHeader>()
+    let list = new List<ZipDirHeader>()
     
     for f in files do write list bw f (Path.GetFileName f)
 
     let dir_start = bw.BaseStream.Position
     for ziph in list do
         bw.Write [| byte 'P'; byte 'K'; 1uy; 2uy |]
-        bw.Write 10us
         ziph.Write bw
-        bw.Write 0s
-        bw.Write 0s
-        bw.Write 0s
-        bw.Write ziph._attrs
-        bw.Write ziph._pos
-        bw.Write ziph._fname
     let dir_len = bw.BaseStream.Position - dir_start
     
     bw.Write [| byte 'P'; byte 'K'; 5uy; 6uy |]
-    bw.Write 0us
-    bw.Write 0us
+    bw.Write 0us // number of this disk
+    bw.Write 0us // number of the disk with the start of the central directory
     bw.Write (uint16 list.Count)
     bw.Write (uint16 list.Count)
     bw.Write (uint32 dir_len)
     bw.Write (uint32 dir_start)
-    bw.Write 0us
+    bw.Write 0us // zipfile comment length
 
 let createZip (files:string[]) =
     let dir = Path.GetDirectoryName files.[0]
