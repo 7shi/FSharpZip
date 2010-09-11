@@ -7,6 +7,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Data;
 using System.Drawing;
+using System.IO;
 using System.Linq;
 using System.Text;
 using System.Windows.Forms;
@@ -32,7 +33,20 @@ namespace ZipForm
         protected override OnDragDrop(e:DragEventArgs) : void
         {
             def files = e.Data.GetData(DataFormats.FileDrop) :> array[string];
-            when (files != null) Zip.createZip(files)
+            when (files != null)
+            {
+                try
+                {
+                    if (files.Length == 1 && Path.GetExtension(files[0]).ToLower() == ".zip")
+                        Zip.extractZip(files[0]);
+                    else
+                        Zip.createZip(files);
+                }
+                catch
+                {
+                    e => _ = MessageBox.Show(this, e.Message, Text);
+                }
+            }
         }
     }
 }

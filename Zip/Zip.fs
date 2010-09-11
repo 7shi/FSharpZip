@@ -5,6 +5,7 @@ module Zip
 open System
 open System.Collections.Generic
 open System.IO
+open System.IO.Compression
 open System.Text
 
 let crc32_table =
@@ -184,3 +185,56 @@ let createZip (files:string[]) =
     use fs1 = new FileStream(Path.Combine(dir, fn), FileMode.Create)
     use bw = new BinaryWriter(fs1)
     writeZip bw files
+
+let extractZip (zip:string) =
+    let dir = Path.ChangeExtension(zip, "")
+    if not(Directory.Exists dir) then
+        ignore <| Directory.CreateDirectory(dir)
+    
+    use fs = new FileStream(zip, FileMode.Open)
+    if fs.Length < 22L then
+        failwith "ファイルが小さ過ぎます。"
+    
+    fs.Position <- fs.Length - 22L
+    use br = new BinaryReader(fs)
+    if br.ReadInt32() <> 0x06054b50 then
+        failwith "ヘッダが見付かりません。"
+    
+    fs.Position <- fs.Position + 6L
+    let count = int <| br.ReadUInt16()
+    let dir_len = br.ReadUInt32()
+    let dir_start = br.ReadUInt32()
+    
+    fs.Position <- int64 dir_start
+    for i = 1 to count do
+        if br.ReadInt32() <> 0x02014b50 then
+            failwith "ファイルが壊れています。"
+        let zipdh = ZipDirHeader.Read br
+        let path = Path.Combine(dir, Encoding.Default.GetString zipdh.fname)
+        if zipdh.attrs &&& (uint32 FileAttributes.Directory) = 0u then
+            let pos = fs.Position
+            fs.Position <- int64 zipdh.pos
+            if br.ReadInt32() <> 0x04034b50 then
+                failwith "ファイルが壊れています。"
+            let ziph = ZipHeader.Read br
+            fs.Position <- fs.Position +
+                           int64(ziph.filename_length + ziph.extra_field_length)
+            let data = br.ReadBytes(int zipdh.header.compressed_size)
+            let data = match ziph.compression with
+                       | 0us -> data // 無圧縮
+                       | 8us -> let buf = Array.zeroCreate<byte> 4096
+                                use mso = new MemoryStream()
+                                use msi = new MemoryStream(data)
+                                use dfs = new DeflateStream(msi, CompressionMode.Decompress)
+                                let rec decomp() =
+                                    let num = dfs.Read(buf, 0, buf.Length)
+                                    if num > 0 then
+                                        mso.Write(buf, 0, num)
+                                        decomp()
+                                decomp()
+                                mso.ToArray()
+                       | _   -> failwith "サポートされていない圧縮形式です。"
+            use fso = new FileStream(path, FileMode.Create)
+            fso.Write(data, 0, data.Length)
+            fs.Position <- pos
+        File.SetAttributes(path, enum<FileAttributes>(int32 zipdh.attrs))
