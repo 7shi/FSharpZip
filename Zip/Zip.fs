@@ -275,16 +275,14 @@ type SubStream(s:Stream, length:int64) =
     override x.Write(_, _, _) = raise <| new NotImplementedException()
     override x.SetLength(_)   = raise <| new NotImplementedException()
 
-let Extract (zip:string) =
-    let dir = Path.ChangeExtension(zip, "")
-    mkdir dir
+let listup (br:BinaryReader) =
+    let list = new List<ZipDirHeader>()
     
-    use fs = new FileStream(zip, FileMode.Open)
+    let fs = br.BaseStream
     if fs.Length < 22L then
         failwith "ファイルが小さ過ぎます。"
     
     fs.Position <- fs.Length - 22L
-    use br = new BinaryReader(fs)
     if br.ReadInt32() <> 0x06054b50 then
         failwith "ヘッダが見付かりません。"
     
@@ -298,6 +296,40 @@ let Extract (zip:string) =
         if br.ReadInt32() <> 0x02014b50 then
             failwith "ファイルが壊れています。"
         let zipdh = ZipDirHeader.Read br
+        list.Add zipdh
+    
+    list
+
+let getTopDir (list:List<ZipDirHeader>) =
+    let mutable ret = ""
+    let mutable en = list.GetEnumerator()
+    let mutable f = true
+    while f && en.MoveNext() do
+        let zipdh = en.Current
+        let fn = Encoding.Default.GetString zipdh.fname
+        if not(isabspath fn) then
+            let p = fn.Replace('\\', '/').IndexOf('/')
+            if p > 0 then
+                let topdir = fn.Substring(0, p)
+                if ret = "" then
+                    ret <- topdir
+                elif ret <> topdir then
+                    ret <- ""
+                    f <- false
+    ret
+
+let Extract (zip:string) =
+    use fs = new FileStream(zip, FileMode.Open)
+    use br = new BinaryReader(fs)
+    let list = listup br
+    
+    let topdir = getTopDir list
+    let dir = if topdir = ""
+              then Path.ChangeExtension(zip, "")
+              else Path.GetDirectoryName(zip)
+    mkdir dir
+    
+    for zipdh in list do
         let dt = zipdh.header.DateTime
         let fn = Encoding.Default.GetString zipdh.fname
         let path = mkrelpath dir fn
@@ -307,7 +339,6 @@ let Extract (zip:string) =
             File.SetAttributes(path, attrs)
             Directory.SetLastWriteTime(path, dt)
         else
-            let pos = fs.Position
             fs.Position <- int64 zipdh.pos
             if br.ReadInt32() <> 0x04034b50 then
                 failwith "ファイルが壊れています。"
@@ -327,4 +358,3 @@ let Extract (zip:string) =
                     failwith("CRC が一致しません: " + fn)
             File.SetAttributes(path, attrs)
             File.SetLastWriteTime(path, dt)
-            fs.Position <- pos
