@@ -204,7 +204,9 @@ let writeZip (bw:BinaryWriter) (files:string[]) =
 
 let Create (files:string[]) =
     let dir = Path.GetDirectoryName files.[0]
-    let fn = Path.GetFileNameWithoutExtension(files.[0]) + ".zip"
+    let fn = if File.Exists(files.[0])
+             then Path.GetFileNameWithoutExtension(files.[0]) + ".zip"
+             else files.[0] + ".zip"
     use fs1 = new FileStream(Path.Combine(dir, fn), FileMode.Create)
     use bw = new BinaryWriter(fs1)
     writeZip bw files
