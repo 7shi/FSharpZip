@@ -209,31 +209,32 @@ let Create (files:string[]) =
     use bw = new BinaryWriter(fs1)
     writeZip bw files
 
-let mkdir (path:string) =
+let mkDir (path:string) =
     if not(Directory.Exists path) then
         ignore <| Directory.CreateDirectory(path)
 
-let ispathsep (ch:char) = ch = '/' || ch = '\\'
+let isPathSep (ch:char) = ch = '/' || ch = '\\'
 
-let isabspath (path:string) =
-    if path.Length >= 1 && ispathsep path.[0] then
-        true
-    elif path.Length >= 3 && Char.IsLetter(path.[0]) && path.[1] = ':' && (ispathsep path.[2]) then
-        true
-    else
-        false
+let hasDrive (path:string) =
+    path.Length >= 3 &&
+    Char.IsLetter path.[0] &&
+    path.[1] = ':' &&
+    isPathSep path.[2]
 
-let mkrelpath (dir:string) (path:string) =
-    if isabspath path then
+let isAbsPath (path:string) =
+    (path.Length >= 1 && isPathSep path.[0]) || hasDrive path
+
+let mkRelPath (dir:string) (path:string) =
+    if isAbsPath path then
         Path.Combine(dir, Path.GetFileName(path))
     else
         let sb = new StringBuilder()
         let mutable ret = dir
         for ch in path do
-            if ispathsep ch then
+            if isPathSep ch then
                 if sb.Length > 0 then
                     ret <- Path.Combine(ret, sb.ToString())
-                    mkdir ret
+                    mkDir ret
                     sb.Length <- 0
             else
                 ignore <| sb.Append ch
@@ -307,7 +308,7 @@ let getTopDir (list:List<ZipDirHeader>) =
     while f && en.MoveNext() do
         let zipdh = en.Current
         let fn = Encoding.Default.GetString zipdh.fname
-        if not(isabspath fn) then
+        if not(isAbsPath fn) then
             let p = fn.Replace('\\', '/').IndexOf('/')
             if p > 0 then
                 let topdir = fn.Substring(0, p)
@@ -327,15 +328,15 @@ let Extract (zip:string) =
     let dir = if topdir = ""
               then Path.ChangeExtension(zip, "")
               else Path.GetDirectoryName(zip)
-    mkdir dir
+    mkDir dir
     
     for zipdh in list do
         let dt = zipdh.header.DateTime
         let fn = Encoding.Default.GetString zipdh.fname
-        let path = mkrelpath dir fn
+        let path = mkRelPath dir fn
         let attrs = enum<FileAttributes>(int zipdh.attrs)
         if int(attrs &&& FileAttributes.Directory) <> 0 then
-            mkdir path
+            mkDir path
             File.SetAttributes(path, attrs)
             Directory.SetLastWriteTime(path, dt)
         else
