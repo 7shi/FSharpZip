@@ -10,25 +10,46 @@ open System.Text
 
 let crc32_table =
     [| for i in 0..255 ->
-        let mutable reg = uint32 i
+        let mutable crc = uint32 i
         for j = 0 to 7 do
-            let reg' = reg >>> 1
-            reg <- if reg &&& 1u = 0u
-                   then reg' else reg' ^^^ 0xedb88320u
-        reg |]
+            let crc' = crc >>> 1
+            crc <- if crc &&& 1u = 0u
+                   then crc' else crc' ^^^ 0xedb88320u
+        crc |]
 
 let crc32 (buf:byte[]) =
-    let mutable reg = ~~~0u
+    let mutable crc = ~~~0u
     for b in buf do
-        reg <- (reg >>> 8) ^^^
-               crc32_table.[int(reg ^^^ (uint32 b)) &&& 0xff]
-    ~~~reg
+        let b' = int(crc ^^^ (uint32 b)) &&& 0xff
+        crc <- (crc >>> 8) ^^^ crc32_table.[b']
+    ~~~crc
+
+let copyStream (src:Stream) (dst:Stream) =
+    let buf = Array.zeroCreate<byte>(16 * 1024)
+    let mutable crc = ~~~0u
+    let mutable f = true
+    while f do
+        let len = src.Read(buf, 0, buf.Length)
+        if len = 0 then f <- false else
+            dst.Write(buf, 0, len)
+            for i = 0 to len - 1 do
+                let b = int(crc ^^^ (uint32 buf.[i])) &&& 0xff
+                crc <- (crc >>> 8) ^^^ crc32_table.[b]
+    ~~~crc
 
 let getDosDate (dt:DateTime) =
     uint16(((dt.Year - 1980) <<< 9) ||| (dt.Month <<< 5) ||| dt.Day)
 
 let getDosTime (dt:DateTime) =
     uint16((dt.Hour <<< 11) ||| (dt.Minute <<< 5) ||| (dt.Second >>> 1))
+
+let getDateTime (dd:uint16) (dt:uint16) =
+    new DateTime(int(dd >>> 9) + 1980,
+                 Math.Max(1, Math.Min(12, int(dd >>> 5) &&& 15)),
+                 Math.Max(1, int(dd) &&& 31),
+                 Math.Min(23, int(dt >>> 11)),
+                 Math.Min(59, int(dt >>> 5) &&& 63),
+                 Math.Min(59, (int(dt) &&& 31) * 2))
 
 type ZipHeader =
     { version:uint16
@@ -83,6 +104,8 @@ type ZipHeader =
         bw.Write x.uncompressed_size
         bw.Write x.filename_length
         bw.Write x.extra_field_length
+    
+    member x.DateTime = getDateTime x.dos_date x.dos_time
 
 type ZipDirHeader =
     { version:uint16
@@ -179,17 +202,82 @@ let writeZip (bw:BinaryWriter) (files:string[]) =
     bw.Write (uint32 dir_start)
     bw.Write 0us // zipfile comment length
 
-let createZip (files:string[]) =
+let Create (files:string[]) =
     let dir = Path.GetDirectoryName files.[0]
     let fn = Path.GetFileNameWithoutExtension(files.[0]) + ".zip"
     use fs1 = new FileStream(Path.Combine(dir, fn), FileMode.Create)
     use bw = new BinaryWriter(fs1)
     writeZip bw files
 
-let extractZip (zip:string) =
+let mkdir (path:string) =
+    if not(Directory.Exists path) then
+        ignore <| Directory.CreateDirectory(path)
+
+let ispathsep (ch:char) = ch = '/' || ch = '\\'
+
+let isabspath (path:string) =
+    if path.Length >= 1 && ispathsep path.[0] then
+        true
+    elif path.Length >= 3 && path.Substring(1, 2) = ":\\" then
+        true
+    else
+        false
+
+let mkrelpath (dir:string) (path:string) =
+    if isabspath path then
+        Path.Combine(dir, Path.GetFileName(path))
+    else
+        let sb = new StringBuilder()
+        let mutable ret = dir
+        for ch in path do
+            if ispathsep ch then
+                if sb.Length > 0 then
+                    ret <- Path.Combine(ret, sb.ToString())
+                    mkdir ret
+                    sb.Length <- 0
+            else
+                ignore <| sb.Append ch
+        if sb.Length > 0 then ret <- Path.Combine(ret, sb.ToString())
+        ret
+
+type SubStream(s:Stream, length:int64) =
+    inherit Stream()
+    
+    let start = s.Position
+    let mutable pos = 0L
+    
+    override x.Length   = length
+    override x.CanRead  = pos < length
+    override x.CanWrite = false
+    override x.CanSeek  = true
+    override x.Flush()  = ()
+    
+    override x.Position
+        with get() = pos
+        and set(v) = pos <- v
+                     s.Position <- start + pos
+    
+    override x.Read(buffer, offset, count) =
+        if not x.CanRead then 0 else
+            let count' = int <| Math.Min(length - pos, int64 count)
+            let ret = s.Read(buffer, offset, count')
+            pos <- pos + (int64 ret)
+            ret
+    
+    override x.Seek(offset, origin) =
+        match origin with
+        | SeekOrigin.Begin   -> x.Position <- offset
+        | SeekOrigin.Current -> x.Position <- pos + offset
+        | SeekOrigin.End     -> x.Position <- length + offset
+        | _ -> ()
+        pos
+    
+    override x.Write(_, _, _) = raise <| new NotImplementedException()
+    override x.SetLength(_)   = raise <| new NotImplementedException()
+
+let Extract (zip:string) =
     let dir = Path.ChangeExtension(zip, "")
-    if not(Directory.Exists dir) then
-        ignore <| Directory.CreateDirectory(dir)
+    mkdir dir
     
     use fs = new FileStream(zip, FileMode.Open)
     if fs.Length < 22L then
@@ -210,8 +298,15 @@ let extractZip (zip:string) =
         if br.ReadInt32() <> 0x02014b50 then
             failwith "ファイルが壊れています。"
         let zipdh = ZipDirHeader.Read br
-        let path = Path.Combine(dir, Encoding.Default.GetString zipdh.fname)
-        if zipdh.attrs &&& (uint32 FileAttributes.Directory) = 0u then
+        let dt = zipdh.header.DateTime
+        let fn = Encoding.Default.GetString zipdh.fname
+        let path = mkrelpath dir fn
+        let attrs = enum<FileAttributes>(int zipdh.attrs)
+        if int(attrs &&& FileAttributes.Directory) <> 0 then
+            mkdir path
+            File.SetAttributes(path, attrs)
+            Directory.SetLastWriteTime(path, dt)
+        else
             let pos = fs.Position
             fs.Position <- int64 zipdh.pos
             if br.ReadInt32() <> 0x04034b50 then
@@ -219,22 +314,17 @@ let extractZip (zip:string) =
             let ziph = ZipHeader.Read br
             fs.Position <- fs.Position +
                            int64(ziph.filename_length + ziph.extra_field_length)
-            let data = br.ReadBytes(int zipdh.header.compressed_size)
-            let data = match ziph.compression with
-                       | 0us -> data // 無圧縮
-                       | 8us -> let buf = Array.zeroCreate<byte> 4096
-                                use mso = new MemoryStream()
-                                use msi = new MemoryStream(data)
-                                use dfs = new DeflateStream(msi, CompressionMode.Decompress)
-                                let rec decomp() =
-                                    let num = dfs.Read(buf, 0, buf.Length)
-                                    if num > 0 then
-                                        mso.Write(buf, 0, num)
-                                        decomp()
-                                decomp()
-                                mso.ToArray()
-                       | _   -> failwith "サポートされていない圧縮形式です。"
-            use fso = new FileStream(path, FileMode.Create)
-            fso.Write(data, 0, data.Length)
+            do
+                use ss = new SubStream(fs, int64 zipdh.header.compressed_size)
+                use file = new FileStream(path, FileMode.Create)
+                let crc =
+                    match ziph.compression with
+                    | 0us -> copyStream ss file
+                    | 8us -> use dfs = new DeflateStream(ss, CompressionMode.Decompress)
+                             copyStream dfs file
+                    | _   -> failwith "サポートされていない圧縮形式です。"
+                if crc <> zipdh.header.crc32 then
+                    failwith("CRC が一致しません: " + fn)
+            File.SetAttributes(path, attrs)
+            File.SetLastWriteTime(path, dt)
             fs.Position <- pos
-        File.SetAttributes(path, enum<FileAttributes>(int32 zipdh.attrs))

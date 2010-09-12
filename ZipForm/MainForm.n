@@ -38,9 +38,9 @@ namespace ZipForm
                 try
                 {
                     if (files.Length == 1 && Path.GetExtension(files[0]).ToLower() == ".zip")
-                        Zip.extractZip(files[0]);
+                        Zip.Extract(files[0]);
                     else
-                        Zip.createZip(files);
+                        Zip.Create(files);
                 }
                 catch
                 {
