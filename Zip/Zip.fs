@@ -218,7 +218,7 @@ let ispathsep (ch:char) = ch = '/' || ch = '\\'
 let isabspath (path:string) =
     if path.Length >= 1 && ispathsep path.[0] then
         true
-    elif path.Length >= 3 && path.Substring(1, 2) = ":\\" then
+    elif path.Length >= 3 && Char.IsLetter(path.[0]) && path.[1] = ':' && (ispathsep path.[2]) then
         true
     else
         false
