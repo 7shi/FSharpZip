@@ -10,7 +10,7 @@ open System.Linq
 let getBit (b:byte) (bit:int) =
     if b &&& (1uy <<< bit) = 0uy then 0 else 1
 
-type BitReader(s:Stream) =
+type BitReader(sin:Stream) =
     let mutable bit = 8
     let mutable cur = 0uy
     
@@ -20,7 +20,7 @@ type BitReader(s:Stream) =
     member x.ReadBit() =
         if bit = 8 then
             bit <- 0
-            let b = s.ReadByte()
+            let b = sin.ReadByte()
             if b = -1 then
                 failwith "バッファを超過しました"
             cur <- byte b
@@ -39,6 +39,12 @@ type BitReader(s:Stream) =
         for i = 0 to n - 1 do
             ret <- (ret <<< 1) ||| x.ReadBit()
         ret
+    
+    member x.ReadBytes len =
+        if bit <> 8 then bit <- 8
+        let buf = Array.zeroCreate<byte> len
+        ignore <| sin.Read(buf, 0, len)
+        buf
 
 type DeflateBuffer(sout:Stream) =
     let max = 32768
@@ -317,10 +323,15 @@ type Reader(sin:Stream) =
     member private x.readBlock() =
         let bfinal = br.ReadBit()
         match br.ReadLE 2 with
-        | 0 -> failwith "非圧縮"
+        | 0 -> br.Skip()
+               let len = br.ReadLE 16
+               let nlen = br.ReadLE 16
+               if len + nlen <> 0x10000 then
+                   failwith "不正な非圧縮長"
+               dbuf.Write (br.ReadBytes len) 0 len
         | 1 -> read fh
         | 2 -> read (new DynamicHuffman(br))
-        | _ -> failwith "不正な値"
+        | _ -> failwith "不正なブロックタイプ"
         if bfinal = 1 then
             canRead <- false
             x.Close()
