@@ -354,10 +354,10 @@ let Extract (zip:string) =
                 let crc =
                     match ziph.compression with
                     | 0us -> copyStream ss file
-                    | 8us -> use dfs = new DeflateStream(ss, CompressionMode.Decompress)
+                    | 8us -> use dfs = new Deflate.Reader(ss)
                              copyStream dfs file
                     | _   -> failwith "サポートされていない圧縮形式です。"
                 if crc <> zipdh.header.crc32 then
-                    failwith("CRC が一致しません: " + fn)
+                    failwith("CRC が一致しません: \n\n" + fn)
             File.SetAttributes(path, attrs)
             File.SetLastWriteTime(path, dt)

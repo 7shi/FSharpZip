@@ -1,33 +1,32 @@
-﻿module Deflate
+﻿// public domain
+
+module Deflate
 
 open System
 open System.Collections.Generic
-open System.Diagnostics
 open System.IO
-open System.Text
+open System.Linq
 
 let getBit (b:byte) (bit:int) =
     if b &&& (1uy <<< bit) = 0uy then 0 else 1
 
-let getBitChar (b:byte) (bit:int) =
-    if b &&& (1uy <<< bit) = 0uy then '0' else '1'
-
-type BitReader(buf:byte[]) =
-    let mutable bytepos = 0
-    let mutable bitpos = 0
+type BitReader(s:Stream) =
+    let mutable bit = 8
+    let mutable cur = 0uy
     
     member x.Skip() =
-        bitpos  <- 0
-        bytepos <- bytepos + 1
+        bit <- 8
     
     member x.ReadBit() =
-        if bytepos >= buf.Length then
-            failwith "バッファを超過しました"
-        else
-            let ret = getBit buf.[bytepos] bitpos
-            bitpos <- bitpos + 1
-            if bitpos = 8 then x.Skip()
-            ret
+        if bit = 8 then
+            bit <- 0
+            let b = s.ReadByte()
+            if b = -1 then
+                failwith "バッファを超過しました"
+            cur <- byte b
+        let ret = if cur &&& (1uy <<< bit) = 0uy then 0 else 1
+        bit <- bit + 1
+        ret
     
     member x.ReadLE n =
         let mutable ret = 0
@@ -41,30 +40,37 @@ type BitReader(buf:byte[]) =
             ret <- (ret <<< 1) ||| x.ReadBit()
         ret
 
-type DeflateBuffer() =
+type DeflateBuffer(sout:Stream) =
     let max = 32768
-    let mutable last:byte[] = null
+    let mutable prev:byte[] = null
     let mutable buf = Array.zeroCreate<byte> max
     let mutable p = 0
-    let list = new List<byte[]>()
     
-    let newbuf() =
-        list.Add buf
-        last <- buf
-        buf <- Array.zeroCreate<byte> max
+    let next newbuf =
+        prev <- buf
+        buf <- if newbuf then Array.zeroCreate<byte> max else null
         p <- 0
+    
+    member x.Close() =
+        next false
+        next false
+    
+    interface IDisposable with
+        member x.Dispose() = x.Close()
     
     member x.WriteByte (b:byte) =
         buf.[p] <- b
+        sout.WriteByte b
         p <- p + 1
-        if p = max then newbuf()
+        if p = max then next true
 
     member x.Write (src:byte[]) start len =
         let maxlen = max - p
         if len <= maxlen then
             Array.Copy(src, start, buf, p, len)
+            sout.Write(src, start, len)
             p <- p + len
-            if p = max then newbuf()
+            if p = max then next true
         else
             x.Write src start maxlen
             x.Write src (start + maxlen) (len - maxlen)
@@ -76,14 +82,14 @@ type DeflateBuffer() =
             failwith <| sprintf "dist too big: %d > %d" dist max
         let pp = p - dist
         if pp < 0 then
-            if last = null then
-                failwith "dist too big: %d > %d" dist p
+            if prev = null then
+                failwith <| sprintf "dist too big: %d > %d" dist p
             let pp = pp + max
             let maxlen = max - pp
             if len <= maxlen then
-                x.Write last pp len
+                x.Write prev pp len
             else
-                x.Write last pp maxlen
+                x.Write prev pp maxlen
                 x.Copy (len - maxlen) dist
         else
             let maxlen = p - pp
@@ -101,29 +107,60 @@ type DeflateBuffer() =
                         let len'' = Math.Min(len', maxlen)
                         x.Write buf' pp len''
                         len' <- len' - len''
-    
-    member x.WriteTo(s:Stream) =
-        for b in list do
-            s.Write(b, 0, b.Length)
-        s.Write(buf, 0, p)
-    
-    member x.ToArray() =
-        let ms = new MemoryStream()
-        x.WriteTo ms
-        ms.ToArray()
 
-let rbin (b:byte) =
-    let sb = new StringBuilder()
-    for i = 0 to 7 do
-        ignore <| sb.Append(getBitChar b i)
-    sb.ToString()
+type Huffman(lens:int[]) =
+    let vals = Array.zeroCreate<int> lens.Length
+    let min = lens.Where(fun x -> x > 0).Min()
+    let max = lens.Max()
+    let counts = Array.zeroCreate<int>  (max + 1)
+    let firsts = Array.zeroCreate<int>  (max + 1)
+    let nexts  = Array.zeroCreate<int>  (max + 1)
+    let tables = Array.zeroCreate<int[]>(max + 1)
+    
+    do
+        for len in lens do
+            if len > 0 then counts.[len] <- counts.[len] + 1
+        for i = 1 to max do
+            firsts.[i] <- (firsts.[i - 1] + counts.[i - 1]) <<< 1
+        Array.Copy(firsts, 0, nexts, 0, max + 1)
+        for i = 0 to vals.Length - 1 do
+            let len = lens.[i]
+            if len > 0 then
+                vals.[i] <- nexts.[len]
+                nexts.[len] <- nexts.[len] + 1
+        
+        for i = 0 to vals.Length - 1 do
+            let len = lens.[i]
+            if len > 0 then
+                let start = firsts.[len]
+                if tables.[len] = null then
+                    let count = nexts.[len] - start
+                    tables.[len] <- Array.zeroCreate<int> count
+                tables.[len].[vals.[i] - start] <- i
+    
+    member x.GetValue h =
+        let rec getv i =
+            if i > max then -1 else
+                if h < nexts.[i] then
+                    tables.[i].[h - firsts.[i]]
+                else
+                    getv (i + 1)
+        getv min
+    
+    member x.Read(br:BitReader) =
+        let rec read h i =
+            if h < nexts.[i] then
+                tables.[i].[h - firsts.[i]]
+            else
+                read ((h <<< 1) ||| br.ReadBit()) (i + 1)
+        read (br.ReadBE min) min
 
-type [<AbstractClass>] Huffman(br:BitReader) =
+type [<AbstractClass>] HuffmanDecoder() =
     abstract GetValue: unit->int
-    abstract GetLength: unit->int
+    abstract GetDistance: unit->int
 
-type FixedHuffman(br) =
-    inherit Huffman(br)
+type FixedHuffman(br:BitReader) =
+    inherit HuffmanDecoder()
     
     override x.GetValue() =
         let v = br.ReadBE 7
@@ -133,40 +170,157 @@ type FixedHuffman(br) =
             elif v < 200 then v + 88
             else ((v <<< 1) ||| br.ReadBit()) - 256
     
-    override x.GetLength() =
-        let d = br.ReadBE 5
-        if d > 29 then failwith <| sprintf "不正な距離: %d" d
-        if d < 4 then d + 1 else
-            let exlen = (d - 2) >>> 1
-            ((d + 1) <<< exlen) ||| (br.ReadBE exlen)
+    override x.GetDistance() = br.ReadBE 5
 
-let rec deflateHuffman (br:BitReader) (dbuf:DeflateBuffer) (h:Huffman) =
-    let v = h.GetValue()
-    if v > 285 then failwith <| sprintf "不正な値: %d" v
-    if v < 256 then
-        dbuf.WriteByte(byte v)
-    elif v > 256 then
+type DynamicHuffman(br:BitReader) =
+    inherit HuffmanDecoder()
+    
+    let lit, dist =
+        let hlit =
+            let hlit = (br.ReadLE 5) + 257
+            if hlit > 286 then failwith <| sprintf "hlit: %d > 286" hlit
+            hlit
+        
+        let hdist =
+            let hdist = (br.ReadLE 5) + 1
+            if hdist > 32 then failwith <| sprintf "hdist: %d > 32" hdist
+            hdist
+        
+        let hclen =
+            let hclen = (br.ReadLE 4) + 4
+            if hclen > 19 then failwith <| sprintf "hclen: %d > 19" hclen
+            hclen
+        
+        let clen =
+            let hclens = Array.zeroCreate<int> 19
+            let order = [| 16; 17; 18; 0; 8; 7; 9; 6; 10; 5;
+                           11; 4; 12; 3; 13; 2; 14; 1; 15 |]
+            for i = 0 to hclen - 1 do
+                hclens.[order.[i]] <- br.ReadLE 3
+            new Huffman(hclens)
+        
+        let ld = Array.zeroCreate<int>(hlit + hdist)
+        let mutable i = 0
+        while i < ld.Length do
+            let v = clen.Read(br)
+            if v < 16 then
+                ld.[i] <- v
+                i <- i + 1
+            else
+                let r, v =
+                    match v with
+                    | 16 -> (br.ReadLE 2) + 3, ld.[i - 1]
+                    | 17 -> (br.ReadLE 3) + 3, 0
+                    | 18 -> (br.ReadLE 7) + 11, 0
+                    | _  -> failwith "不正な値です。"
+                for j = 0 to r - 1 do
+                    ld.[i + j] <- v
+                i <- i + r
+        
+        new Huffman(ld.[0 .. hlit - 1]),
+        new Huffman(ld.[hlit .. hlit + hdist - 1])
+    
+    override x.GetValue() = lit.Read br
+    override x.GetDistance() = dist.Read br
+
+let getLitExLen v = if v < 265 || v = 285 then 0 else (v - 261) >>> 2
+let getDistExLen d = if d < 4 then 0 else (d - 2) >>> 1
+
+let litlens =
+    let litlens = Array.zeroCreate<int> 286
+    let mutable v = 3
+    for i = 257 to 284 do
+        litlens.[i] <- v
+        v <- v + (1 <<< (getLitExLen i))
+    litlens.[285] <- 258
+    litlens.[257..285]
+
+let distlens =
+    let distlens = Array.zeroCreate<int> 30
+    let mutable v = 1
+    for i = 0 to 29 do
+        distlens.[i] <- v
+        v <- v + (1 <<< (getDistExLen i))
+    distlens
+
+type Reader(sin:Stream) =
+    inherit Stream()
+    
+    let br = new BitReader(sin)
+    let fh = new FixedHuffman(br)
+    
+    let sout = new MemoryStream()
+    let dbuf = new DeflateBuffer(sout)
+    
+    let mutable cache:byte[] = null
+    let mutable canRead = true
+
+    let rec read (h:HuffmanDecoder) =
+        let v = h.GetValue()
+        if v > 285 then failwith <| sprintf "不正な値: %d" v
+        if v < 256 then
+            dbuf.WriteByte(byte v)
+        elif v > 256 then
+            let len =
+                if v < 265 then v - 254 else
+                    litlens.[v - 257] + (br.ReadLE (getLitExLen v))
+            let dist =
+                let d = h.GetDistance()
+                if d > 29 then failwith <| sprintf "不正な距離: %d" d
+                if d < 4 then d + 1 else
+                    distlens.[d] + (br.ReadLE (getDistExLen d))
+            dbuf.Copy len dist
+        if v <> 256 then read h
+    
+    override x.CanRead  = canRead
+    override x.CanWrite = false
+    override x.CanSeek  = false
+    override x.Flush()  = ()
+    
+    override x.Close() =
+        dbuf.Close()
+        canRead <- false
+    
+    override x.Read(buffer, offset, count) =
+        let offset =
+            if cache = null then 0 else
+                let clen = cache.Length
+                let len = Math.Min(clen, count)
+                Array.Copy(cache, 0, buffer, offset, len)
+                cache <- if len = clen then null
+                         else cache.[len .. clen - 1]
+                len
+        let req = int64 <| count - offset
+        while canRead && sout.Length < req do
+            x.readBlock()
         let len =
-            if v < 265 then v - 254 else
-                let exlen = (v - 261) >>> 2
-                ((v - 254) <<< exlen) ||| (br.ReadBE exlen)
-        let dist = h.GetLength()
-        Debug.WriteLine <| sprintf "len: %d, dist: %d" len dist
-        dbuf.Copy len dist
-    if v <> 256 then
-        deflateHuffman br dbuf h
-
-let Check (path:string) =
-    let buf = File.ReadAllBytes(path)
-    let br = new BitReader(buf)
-    let dbuf = new DeflateBuffer()
-    let mutable bfinal = 0
-    while bfinal = 0 do
-        bfinal <- br.ReadBit()
+            if sout.Length = 0L then 0 else
+                let data = sout.ToArray()
+                sout.SetLength(0L)
+                let dlen = data.Length
+                let len = Math.Min(int req, dlen)
+                Array.Copy(data, 0, buffer, offset, len)
+                if dlen > len then
+                    cache <- data.[len..]
+                len
+        offset + len
+    
+    override x.Position
+        with get() = raise <| new NotImplementedException()
+        and set(v) = raise <| new NotImplementedException()
+    
+    override x.Length         = raise <| new NotImplementedException()
+    override x.Seek(_, _)     = raise <| new NotImplementedException()
+    override x.Write(_, _, _) = raise <| new NotImplementedException()
+    override x.SetLength(_)   = raise <| new NotImplementedException()
+    
+    member private x.readBlock() =
+        let bfinal = br.ReadBit()
         match br.ReadLE 2 with
         | 0 -> failwith "非圧縮"
-        | 1 -> deflateHuffman br dbuf (new FixedHuffman(br))
-        | 2 -> failwith "動的ハフマン符号"
+        | 1 -> read fh
+        | 2 -> read (new DynamicHuffman(br))
         | _ -> failwith "不正な値"
-    Debug.Write(Encoding.Default.GetString(dbuf.ToArray()))
-    Debug.WriteLine("")
+        if bfinal = 1 then
+            canRead <- false
+            x.Close()
