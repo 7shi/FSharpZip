@@ -63,20 +63,20 @@ type ZipHeader =
       filename_length:uint16
       extra_field_length:uint16 }
 
-    static member Create path (relb:byte[]) (data:byte[]) pos =
-        let dt, crc, size =
+    static member Create path (relb:byte[]) size1 crc (data:byte[]) pos =
+        let dt, size2 =
             if data = null then
-                Directory.GetLastWriteTime path, 0u, 0u
+                Directory.GetLastWriteTime path, 0u
             else
-                File.GetLastWriteTime path, crc32 data, uint32 data.Length
-        { version            = 10us
+                File.GetLastWriteTime path, uint32 data.Length
+        { version            = 20us
           flags              = 0us
-          compression        = 0us
+          compression        = 8us
           dos_time           = getDosTime(dt)
           dos_date           = getDosDate(dt)
           crc32              = crc
-          compressed_size    = size
-          uncompressed_size  = size
+          compressed_size    = size2
+          uncompressed_size  = size1
           filename_length    = uint16 relb.Length
           extra_field_length = 0us }
     
@@ -117,10 +117,10 @@ type ZipDirHeader =
       pos:uint32
       fname:byte[] }
 
-    static member Create path (rel:string) (data:byte[]) pos =
+    static member Create path (rel:string) size1 crc (data:byte[]) pos =
         let relb = Encoding.Default.GetBytes rel
-        { version = 10us
-          header  = ZipHeader.Create path relb data pos
+        { version = 20us
+          header  = ZipHeader.Create path relb size1 crc data pos
           _1      = 0us
           _2      = 0us
           _3      = 0us
@@ -157,16 +157,19 @@ let mkrel reldir (name:string) =
     if reldir = "" then name else reldir + "/" + name
 
 let writeFile (list:List<ZipDirHeader>) (bw:BinaryWriter) path rel =
-    let data = File.ReadAllBytes path
-    let ziph = ZipDirHeader.Create path rel data (uint32 bw.BaseStream.Position)
+    let data1 = File.ReadAllBytes path
+    let data2 = Deflate.GetCompressBytes data1
+    let p = uint32 bw.BaseStream.Position
+    let ziph = ZipDirHeader.Create path rel (uint32 data1.Length) (crc32 data1) data2 p
     bw.Write [| byte 'P'; byte 'K'; 3uy; 4uy |]
     ziph.header.Write bw
     bw.Write ziph.fname
-    bw.Write data
+    bw.Write data2
     list.Add(ziph)
 
 let rec writeDir (list:List<ZipDirHeader>) (bw:BinaryWriter) path rel =
-    let ziph = ZipDirHeader.Create path (rel + "/") null (uint32 bw.BaseStream.Position)
+    let p = uint32 bw.BaseStream.Position
+    let ziph = ZipDirHeader.Create path (rel + "/") 0u 0u null p
     bw.Write [| byte 'P'; byte 'K'; 3uy; 4uy |]
     ziph.header.Write bw
     bw.Write ziph.fname

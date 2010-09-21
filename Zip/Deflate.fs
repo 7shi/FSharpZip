@@ -335,3 +335,106 @@ type Reader(sin:Stream) =
         if bfinal = 1 then
             canRead <- false
             x.Close()
+
+type BitWriter(sout:Stream) =
+    let mutable bit = 0
+    let mutable cur = 0uy
+    
+    member x.Skip() =
+        if bit > 0 then
+            sout.WriteByte(cur)
+            bit <- 0
+            cur <- 0uy
+    
+    interface IDisposable with
+        member x.Dispose() =
+            x.Skip()
+            sout.Flush()
+    
+    member x.WriteBit(b:int) =
+        cur <- cur ||| ((byte b) <<< bit)
+        bit <- bit + 1
+        if bit = 8 then
+            sout.WriteByte(cur)
+            bit <- 0
+            cur <- 0uy
+    
+    member x.WriteLE (len:int) (b:int) =
+        for i = 0 to len - 1 do
+            x.WriteBit <| if (b &&& (1 <<< i)) = 0 then 0 else 1
+    
+    member x.WriteBE (len:int) (b:int) =
+        for i = len - 1 downto 0 do
+            x.WriteBit <| if (b &&& (1 <<< i)) = 0 then 0 else 1
+    
+    member x.WriteBytes(data:byte[]) =
+        x.Skip()
+        sout.Write(data, 0, data.Length)
+
+type FixedHuffmanWriter(bw:BitWriter) =
+    member x.Write (b:int) =
+        if b < 144 then
+            bw.WriteBE 8 (b + 0b110000)
+        elif b < 256 then
+            bw.WriteBE 9 (b - 144 + 0b110010000)
+        elif b < 280 then
+            bw.WriteBE 7 (b - 256)
+        elif b < 288 then
+            bw.WriteBE 8 (b - 280 + 0b11000000)
+    
+    member x.WriteLen (len:int) =
+        if len < 3 || len > 258 then
+            failwith <| sprintf "不正な長さ: %d" len
+        let mutable ll = 285
+        while len < litlens.[ll - 257] do
+            ll <- ll - 1
+        x.Write ll
+        bw.WriteLE (getLitExLen ll) (len - litlens.[ll - 257])
+    
+    member x.WriteDist (d:int) =
+        if d < 1 || d > 32768 then
+            failwith <| sprintf "不正な距離: %d" d
+        let mutable dl = 29
+        while d < distlens.[dl] do
+            dl <- dl - 1
+        bw.WriteBE 5 dl
+        bw.WriteLE (getDistExLen dl) (d - distlens.[dl])
+
+let search (data:byte[]) (pos:int) =
+    let mutable p = pos - 1
+    let mutable maxp = -1
+    let mutable maxl = 0
+    let mlen = Math.Min(258, data.Length - pos)
+    let last = Math.Max(0, pos - 32768)
+    while p >= last do
+        let mutable len = 0
+        while len < mlen && data.[p + len] = data.[pos + len] do
+            len <- len + 1
+        if len > maxl then
+            maxp <- p
+            maxl <- len
+        p <- p - 1
+    maxp, maxl
+
+let Compress (sout:Stream) (data:byte[]) =
+    use bw = new BitWriter(sout)
+    bw.WriteBit 1
+    bw.WriteLE 2 1
+    let hw = new FixedHuffmanWriter(bw)
+    let len = data.Length
+    let mutable p = 0
+    while p < len do
+        let maxp, maxl = search data p
+        if maxl < 3 then
+            hw.Write(int data.[p])
+            p <- p + 1
+        else
+            hw.WriteLen maxl
+            hw.WriteDist (p - maxp)
+            p <- p + maxl
+    hw.Write 256
+
+let GetCompressBytes (data:byte[]) =
+    let ms = new MemoryStream()
+    Compress ms data
+    ms.ToArray()
