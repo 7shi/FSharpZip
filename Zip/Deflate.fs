@@ -409,27 +409,41 @@ type ReadBuffer(sin:Stream) =
     let mutable length = buflen
     let buf = Array.zeroCreate<byte> buflen
     
+    let hash =
+        let hash = Array.zeroCreate<List<int>> 4096
+        for i = 0 to 4095 do hash.[i] <- new List<int>()
+        hash
+    
     let read pos len =
         let rlen = sin.Read(buf, pos, len)
         if rlen < len then length <- pos + rlen
+        
+        for list in hash do list.Clear()
+        for i = 0 to length - 3 do
+            let h = ((int buf.[i]) <<< 4) ^^^ ((int buf.[i + 1]) <<< 2) ^^^ (int buf.[i + 2])
+            hash.[h].Add i
     
     do
         read 0 buflen
     
     let search (pos:int) =
-        let mutable p = pos - 1
         let mutable maxp = -1
         let mutable maxl = 2
         let mlen = Math.Min(258, length - pos)
         let last = Math.Max(0, pos - maxbuf)
-        while p >= last do
-            let mutable len = 0
-            while len < mlen && buf.[p + len] = buf.[pos + len] do
-                len <- len + 1
-            if len > maxl then
-                maxp <- p
-                maxl <- len
-            p <- p - 1
+        let h = ((int buf.[pos]) <<< 4) ^^^ ((int buf.[pos + 1]) <<< 2) ^^^ (int buf.[pos + 2])
+        let list = hash.[h]
+        let mutable i = list.Count - 1
+        while i >= 0 && list.[i] >= last do
+            let p = list.[i]
+            if p < pos then
+                let mutable len = 0
+                while len < mlen && buf.[p + len] = buf.[pos + len] do
+                    len <- len + 1
+                if len > maxl then
+                    maxp <- p
+                    maxl <- len
+            i <- i - 1
         maxp, maxl
 
     member x.Compress (sout:Stream) =
