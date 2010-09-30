@@ -7,7 +7,7 @@ open System.Collections.Generic
 open System.IO
 open System.Linq
 
-let bufmax = 32768
+let maxbuf = 32768
 
 let getBit (b:byte) (bit:int) =
     if b &&& (1uy <<< bit) = 0uy then 0 else 1
@@ -50,12 +50,12 @@ type BitReader(sin:Stream) =
 
 type WriteBuffer(sout:Stream) =
     let mutable prev:byte[] = null
-    let mutable buf = Array.zeroCreate<byte> bufmax
+    let mutable buf = Array.zeroCreate<byte> maxbuf
     let mutable p = 0
     
     let next newbuf =
         prev <- buf
-        buf <- if newbuf then Array.zeroCreate<byte> bufmax else null
+        buf <- if newbuf then Array.zeroCreate<byte> maxbuf else null
         p <- 0
     
     member x.Close() =
@@ -69,15 +69,15 @@ type WriteBuffer(sout:Stream) =
         buf.[p] <- b
         sout.WriteByte b
         p <- p + 1
-        if p = bufmax then next true
+        if p = maxbuf then next true
 
     member x.Write (src:byte[]) start len =
-        let maxlen = bufmax - p
+        let maxlen = maxbuf - p
         if len <= maxlen then
             Array.Copy(src, start, buf, p, len)
             sout.Write(src, start, len)
             p <- p + len
-            if p = bufmax then next true
+            if p = maxbuf then next true
         else
             x.Write src start maxlen
             x.Write src (start + maxlen) (len - maxlen)
@@ -85,14 +85,14 @@ type WriteBuffer(sout:Stream) =
     member x.Copy len dist =
         if dist < 1 then
             failwith <| sprintf "dist too small: %d < 1" dist
-        elif dist > bufmax then
-            failwith <| sprintf "dist too big: %d > %d" dist bufmax
+        elif dist > maxbuf then
+            failwith <| sprintf "dist too big: %d > %d" dist maxbuf
         let pp = p - dist
         if pp < 0 then
             if prev = null then
                 failwith <| sprintf "dist too big: %d > %d" dist p
-            let pp = pp + bufmax
-            let maxlen = bufmax - pp
+            let pp = pp + maxbuf
+            let maxlen = maxbuf - pp
             if len <= maxlen then
                 x.Write prev pp len
             else
@@ -393,7 +393,7 @@ type FixedHuffmanWriter(bw:BitWriter) =
         bw.WriteLE (getLitExLen ll) (len - litlens.[ll - 257])
     
     member x.WriteDist (d:int) =
-        if d < 1 || d > bufmax then
+        if d < 1 || d > maxbuf then
             failwith <| sprintf "不正な距離: %d" d
         let mutable dl = 29
         while d < distlens.[dl] do
@@ -413,7 +413,7 @@ type ReadBuffer(sin:Stream) =
         let mutable maxp = -1
         let mutable maxl = 0
         let mlen = Math.Min(258, data.Length - pos)
-        let last = Math.Max(0, pos - bufmax)
+        let last = Math.Max(0, pos - maxbuf)
         while p >= last do
             let mutable len = 0
             while len < mlen && data.[p + len] = data.[pos + len] do
