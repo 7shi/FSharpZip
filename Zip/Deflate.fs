@@ -405,23 +405,18 @@ type FixedHuffmanWriter(bw:BitWriter) =
 let maxbuf2 = maxbuf * 2
 let buflen = maxbuf2 + maxlen
 
+let inline getHash (buf:byte[]) pos =
+    ((int buf.[pos]) <<< 4) ^^^ ((int buf.[pos + 1]) <<< 2) ^^^ (int buf.[pos + 2])
+
 type ReadBuffer(sin:Stream) =
     let mutable length = buflen
     let buf = Array.zeroCreate<byte> buflen
-    
-    let hash =
-        let hash = Array.zeroCreate<List<int>> 4096
-        for i = 0 to 4095 do hash.[i] <- new List<int>()
-        hash
+    let hash = [| for _ in 0..4095 -> new List<int>() |]
     
     let read pos len =
         let rlen = sin.Read(buf, pos, len)
         if rlen < len then length <- pos + rlen
-        
         for list in hash do list.Clear()
-        for i = 0 to length - 3 do
-            let h = ((int buf.[i]) <<< 4) ^^^ ((int buf.[i + 1]) <<< 2) ^^^ (int buf.[i + 2])
-            hash.[h].Add i
     
     do
         read 0 buflen
@@ -431,18 +426,16 @@ type ReadBuffer(sin:Stream) =
         let mutable maxl = 2
         let mlen = Math.Min(258, length - pos)
         let last = Math.Max(0, pos - maxbuf)
-        let h = ((int buf.[pos]) <<< 4) ^^^ ((int buf.[pos + 1]) <<< 2) ^^^ (int buf.[pos + 2])
-        let list = hash.[h]
+        let list = hash.[getHash buf pos]
         let mutable i = list.Count - 1
         while i >= 0 && list.[i] >= last do
             let p = list.[i]
-            if p < pos then
-                let mutable len = 0
-                while len < mlen && buf.[p + len] = buf.[pos + len] do
-                    len <- len + 1
-                if len > maxl then
-                    maxp <- p
-                    maxl <- len
+            let mutable len = 0
+            while len < mlen && buf.[p + len] = buf.[pos + len] do
+                len <- len + 1
+            if len > maxl then
+                maxp <- p
+                maxl <- len
             i <- i - 1
         maxp, maxl
 
@@ -456,16 +449,21 @@ type ReadBuffer(sin:Stream) =
             let maxp, maxl = search p
             if maxp < 0 then
                 hw.Write(int buf.[p])
+                hash.[getHash buf p].Add p
                 p <- p + 1
             else
                 hw.WriteLen maxl
                 hw.WriteDist (p - maxp)
+                for i = p to p + maxl - 1 do
+                    hash.[getHash buf i].Add i
                 p <- p + maxl
             if p > maxbuf2 then
                 Array.Copy(buf, maxbuf, buf, 0, maxbuf + maxlen)
                 if length < buflen then length <- length - maxbuf else
                     read (maxbuf + maxlen) maxbuf
                 p <- p - maxbuf
+                for i = 0 to p - 1 do
+                    hash.[getHash buf i].Add i
         hw.Write 256
 
 let GetCompressBytes (sin:Stream) =
