@@ -419,7 +419,7 @@ type ReadBuffer(sin:Stream) =
     let search (pos:int) =
         let mutable p = pos - 1
         let mutable maxp = -1
-        let mutable maxl = 0
+        let mutable maxl = 2
         let mlen = Math.Min(258, length - pos)
         let last = Math.Max(0, pos - maxbuf)
         while p >= last do
@@ -440,7 +440,7 @@ type ReadBuffer(sin:Stream) =
         let mutable p = 0
         while p < length do
             let maxp, maxl = search p
-            if maxl < 3 then
+            if maxp < 0 then
                 hw.Write(int buf.[p])
                 p <- p + 1
             else
