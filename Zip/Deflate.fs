@@ -401,41 +401,51 @@ type FixedHuffmanWriter(bw:BitWriter) =
         bw.WriteBE 5 dl
         bw.WriteLE (getDistExLen dl) (d - distlens.[dl])
 
-let search (data:byte[]) (pos:int) =
-    let mutable p = pos - 1
-    let mutable maxp = -1
-    let mutable maxl = 0
-    let mlen = Math.Min(258, data.Length - pos)
-    let last = Math.Max(0, pos - bufmax)
-    while p >= last do
-        let mutable len = 0
-        while len < mlen && data.[p + len] = data.[pos + len] do
-            len <- len + 1
-        if len > maxl then
-            maxp <- p
-            maxl <- len
-        p <- p - 1
-    maxp, maxl
+type ReadBuffer(sin:Stream) =
+    let data =
+        let len = int <| sin.Length - sin.Position
+        let data = Array.zeroCreate<byte> len
+        ignore <| sin.Read(data, 0, len)
+        data
 
-let Compress (sout:Stream) (data:byte[]) =
-    use bw = new BitWriter(sout)
-    bw.WriteBit 1
-    bw.WriteLE 2 1
-    let hw = new FixedHuffmanWriter(bw)
-    let len = data.Length
-    let mutable p = 0
-    while p < len do
-        let maxp, maxl = search data p
-        if maxl < 3 then
-            hw.Write(int data.[p])
-            p <- p + 1
-        else
-            hw.WriteLen maxl
-            hw.WriteDist (p - maxp)
-            p <- p + maxl
-    hw.Write 256
+    let search (data:byte[]) (pos:int) =
+        let mutable p = pos - 1
+        let mutable maxp = -1
+        let mutable maxl = 0
+        let mlen = Math.Min(258, data.Length - pos)
+        let last = Math.Max(0, pos - bufmax)
+        while p >= last do
+            let mutable len = 0
+            while len < mlen && data.[p + len] = data.[pos + len] do
+                len <- len + 1
+            if len > maxl then
+                maxp <- p
+                maxl <- len
+            p <- p - 1
+        maxp, maxl
 
-let GetCompressBytes (data:byte[]) =
+    member x.Compress (sout:Stream) =
+        use bw = new BitWriter(sout)
+        bw.WriteBit 1
+        bw.WriteLE 2 1
+        let hw = new FixedHuffmanWriter(bw)
+        let len = data.Length
+        let mutable p = 0
+        while p < len do
+            let maxp, maxl = search data p
+            if maxl < 3 then
+                hw.Write(int data.[p])
+                p <- p + 1
+            else
+                hw.WriteLen maxl
+                hw.WriteDist (p - maxp)
+                p <- p + maxl
+        hw.Write 256
+
+let GetCompressBytes (sin:Stream) =
+    let now = DateTime.Now
     let ms = new MemoryStream()
-    Compress ms data
+    let rb = new ReadBuffer(sin)
+    rb.Compress ms
+    System.Diagnostics.Debug.WriteLine((DateTime.Now - now).ToString())
     ms.ToArray()

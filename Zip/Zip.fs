@@ -158,7 +158,7 @@ let mkrel reldir (name:string) =
 
 let writeFile (list:List<ZipDirHeader>) (bw:BinaryWriter) path rel =
     let data1 = File.ReadAllBytes path
-    let data2 = Deflate.GetCompressBytes data1
+    let data2 = Deflate.GetCompressBytes(new MemoryStream(data1))
     let p = uint32 bw.BaseStream.Position
     let ziph = ZipDirHeader.Create path rel (uint32 data1.Length) (crc32 data1) data2 p
     bw.Write [| byte 'P'; byte 'K'; 3uy; 4uy |]
