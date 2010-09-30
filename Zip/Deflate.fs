@@ -8,6 +8,7 @@ open System.IO
 open System.Linq
 
 let maxbuf = 32768
+let maxlen = 258
 
 let getBit (b:byte) (bit:int) =
     if b &&& (1uy <<< bit) = 0uy then 0 else 1
@@ -239,7 +240,7 @@ let litlens =
     for i = 257 to 284 do
         litlens.[i] <- v
         v <- v + (1 <<< (getLitExLen i))
-    litlens.[285] <- 258
+    litlens.[285] <- maxlen
     litlens.[257..285]
 
 let distlens =
@@ -384,7 +385,7 @@ type FixedHuffmanWriter(bw:BitWriter) =
             bw.WriteBE 8 (b - 280 + 0b11000000)
     
     member x.WriteLen (len:int) =
-        if len < 3 || len > 258 then
+        if len < 3 || len > maxlen then
             failwith <| sprintf "不正な長さ: %d" len
         let mutable ll = 285
         while len < litlens.[ll - 257] do
@@ -401,22 +402,29 @@ type FixedHuffmanWriter(bw:BitWriter) =
         bw.WriteBE 5 dl
         bw.WriteLE (getDistExLen dl) (d - distlens.[dl])
 
-type ReadBuffer(sin:Stream) =
-    let data =
-        let len = int <| sin.Length - sin.Position
-        let data = Array.zeroCreate<byte> len
-        ignore <| sin.Read(data, 0, len)
-        data
+let maxbuf2 = maxbuf * 2
+let buflen = maxbuf2 + maxlen
 
-    let search (data:byte[]) (pos:int) =
+type ReadBuffer(sin:Stream) =
+    let mutable length = buflen
+    let buf = Array.zeroCreate<byte> buflen
+    
+    let read pos len =
+        let rlen = sin.Read(buf, pos, len)
+        if rlen < len then length <- pos + rlen
+    
+    do
+        read 0 buflen
+    
+    let search (pos:int) =
         let mutable p = pos - 1
         let mutable maxp = -1
         let mutable maxl = 0
-        let mlen = Math.Min(258, data.Length - pos)
+        let mlen = Math.Min(258, length - pos)
         let last = Math.Max(0, pos - maxbuf)
         while p >= last do
             let mutable len = 0
-            while len < mlen && data.[p + len] = data.[pos + len] do
+            while len < mlen && buf.[p + len] = buf.[pos + len] do
                 len <- len + 1
             if len > maxl then
                 maxp <- p
@@ -429,17 +437,21 @@ type ReadBuffer(sin:Stream) =
         bw.WriteBit 1
         bw.WriteLE 2 1
         let hw = new FixedHuffmanWriter(bw)
-        let len = data.Length
         let mutable p = 0
-        while p < len do
-            let maxp, maxl = search data p
+        while p < length do
+            let maxp, maxl = search p
             if maxl < 3 then
-                hw.Write(int data.[p])
+                hw.Write(int buf.[p])
                 p <- p + 1
             else
                 hw.WriteLen maxl
                 hw.WriteDist (p - maxp)
                 p <- p + maxl
+            if p > maxbuf2 then
+                Array.Copy(buf, maxbuf, buf, 0, maxbuf + maxlen)
+                if length < buflen then length <- length - maxbuf else
+                    read (maxbuf + maxlen) maxbuf
+                p <- p - maxbuf
         hw.Write 256
 
 let GetCompressBytes (sin:Stream) =
