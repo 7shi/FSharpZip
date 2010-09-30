@@ -1,4 +1,6 @@
-﻿module Crc
+﻿// public domain
+
+module Crc
 
 open System
 open System.IO
