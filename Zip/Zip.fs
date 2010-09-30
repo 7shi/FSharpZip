@@ -129,14 +129,17 @@ let mkrel reldir (name:string) =
     if reldir = "" then name else reldir + "/" + name
 
 let writeFile (list:List<ZipDirHeader>) (bw:BinaryWriter) path rel =
-    let data1 = File.ReadAllBytes path
-    let data2 = Deflate.GetCompressBytes(new MemoryStream(data1))
+    let len, data, crc =
+        use fs = new FileStream(path, FileMode.Open)
+        let len = fs.Length
+        let data, crc = Deflate.GetCompressBytes(fs)
+        uint32 len, data, crc
     let p = uint32 bw.BaseStream.Position
-    let ziph = ZipDirHeader.Create path rel (uint32 data1.Length) (crc32 data1) data2 p
+    let ziph = ZipDirHeader.Create path rel len crc data p
     bw.Write [| byte 'P'; byte 'K'; 3uy; 4uy |]
     ziph.header.Write bw
     bw.Write ziph.fname
-    bw.Write data2
+    bw.Write data
     list.Add(ziph)
 
 let rec writeDir (list:List<ZipDirHeader>) (bw:BinaryWriter) path rel =
